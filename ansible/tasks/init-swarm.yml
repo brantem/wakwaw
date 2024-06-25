@@ -1,0 +1,35 @@
+---
+- name: Init swarm
+  block:
+    - name: Init swarm
+      community.docker.docker_swarm:
+        state: present
+        advertise_addr: "{{ hostvars[inventory_hostname].private_ip }}:2377"
+      register: init_swarm
+
+    - name: Define join token manager
+      ansible.builtin.set_fact:
+        join_token_manager: "{{ init_swarm.swarm_facts.JoinTokens.Manager }}"
+
+    - name: Define join token worker
+      ansible.builtin.set_fact:
+        join_token_worker: "{{ init_swarm.swarm_facts.JoinTokens.Worker }}"
+
+  rescue:
+    - name: Get join token for manager
+      ansible.builtin.command: docker swarm join-token -q manager
+      register: join_token_manager
+      changed_when: false
+
+    - name: Define join_token_manager
+      ansible.builtin.set_fact:
+        join_token_manager: "{{ join_token_manager['stdout'] }}"
+
+    - name: Get join token for worker
+      ansible.builtin.command: docker swarm join-token -q worker
+      register: join_token_worker
+      changed_when: false
+
+    - name: Define join_token_worker
+      ansible.builtin.set_fact:
+        join_token_worker: "{{ join_worker_token['stdout'] }}"

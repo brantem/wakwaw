@@ -1,0 +1,74 @@
+multitenancy_enabled: false
+
+common:
+  storage:
+    backend: s3
+    s3:
+      endpoint: minio:9000
+      bucket_name: observability
+      secret_access_key: ${MINIO_PASSWORD}
+      access_key_id: ${MINIO_USERNAME}
+      insecure: true
+
+server:
+  http_listen_address: 0.0.0.0
+  http_listen_port: 9009
+  log_format: json
+  log_level: warn
+
+ingester:
+  ring:
+    kvstore:
+      store: inmemory
+    replication_factor: 1
+    instance_addr: 127.0.0.1
+
+query_scheduler:
+  ring:
+    kvstore:
+      store: inmemory
+    instance_addr: 127.0.0.1
+
+ruler:
+  ring:
+    kvstore:
+      store: inmemory
+    instance_addr: 127.0.0.1
+  rule_path: /tmp/mimir/ruler
+
+ruler_storage:
+  storage_prefix: ruler
+
+alertmanager:
+  sharding_ring:
+    kvstore:
+      store: inmemory
+    instance_addr: 127.0.0.1
+  data_dir: /tmp/mimir/alertmanager
+
+alertmanager_storage:
+  storage_prefix: alertmanager
+
+limits:
+  max_label_names_per_series: 50
+
+blocks_storage:
+  storage_prefix: blocks
+  bucket_store:
+    sync_dir: /tmp/mimir/sync
+  tsdb:
+    dir: /tmp/mimir/tsdb
+
+compactor:
+  data_dir: /tmp/mimir/compactor
+  sharding_ring:
+    kvstore:
+      store: inmemory
+    instance_addr: 127.0.0.1
+
+store_gateway:
+  sharding_ring:
+    kvstore:
+      store: inmemory
+    replication_factor: 1
+    instance_addr: 127.0.0.1

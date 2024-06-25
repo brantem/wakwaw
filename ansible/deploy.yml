@@ -1,0 +1,31 @@
+- name: Deploy
+  hosts: manager[0]
+  tasks:
+    - name: Copy
+      ansible.posix.synchronize:
+        src: ../swarm/
+        dest: '{{ ansible_env.HOME }}/swarm'
+        checksum: true
+        recursive: true
+        rsync_opts:
+          - '--include={{ stack_name }}/***'
+          - '--include=.env'
+          - '--exclude=*'
+
+    - name: Build app
+      vars:
+        app_path: app/
+        app_name: '{{ item }}'
+      ansible.builtin.include_tasks: tasks/build.yml
+      loop:
+        - api
+        - worker
+      when: stack_name == 'app'
+
+    - name: Deploy
+      ansible.builtin.shell: |
+        export $(cat .env) > /dev/null
+        docker stack deploy --prune -c {{ stack_name }}/docker-compose.yml {{ stack_name }}
+      args:
+        chdir: swarm/
+      changed_when: false

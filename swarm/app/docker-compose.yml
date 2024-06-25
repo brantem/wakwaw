@@ -1,0 +1,86 @@
+version: '3.8'
+
+x-healthcheck: &healthcheck
+  interval: 15s
+  timeout: 5s
+  start_period: 30s
+  retries: 5
+
+x-logging: &logging
+  logging:
+    options:
+      max-size: 4m
+      max-file: 10
+      tag: '{{.ImageName}}/{{.Name}}/{{.ID}}'
+
+x-deploy: &deploy
+  mode: replicated
+  replicas: 1
+  restart_policy:
+    max_attempts: 2
+  rollback_config:
+    parallelism: 1
+  update_config:
+    parallelism: 1
+    failure_action: rollback
+    order: start-first
+  placement:
+    constraints:
+      - node.role != manager
+
+services:
+  api:
+    image: registry.local:5000/api:latest
+    ports:
+      - 4000
+    env_file:
+      - ../.env
+      - .env
+    environment:
+      PORT: 4000
+      REDIS_DB: 0
+    healthcheck:
+      test: curl -sf http://localhost:4000/health || exit 1
+      <<: *healthcheck
+    <<: *logging
+    networks:
+      - internal
+      - external
+    depends_on:
+      - redis
+      - postgres
+    deploy:
+      <<: *deploy
+      labels:
+        - 'traefik.http.middlewares.strip-api.stripprefix.prefixes=/api'
+
+        - 'traefik.enable=true'
+        - 'traefik.http.routers.api.rule=Host(`${NAME}.${DOMAIN}`) && PathPrefix(`/api`)'
+        - 'traefik.http.routers.api.middlewares=strip-api'
+        - 'traefik.http.services.api.loadbalancer.server.port=4000'
+        - 'traefik.docker.lbswarm=true'
+
+  worker:
+    image: registry.local:5000/worker:latest
+    ports:
+      - 4000
+    env_file:
+      - .env
+    environment:
+      REDIS_DB: 1
+    healthcheck:
+      test: curl -sf http://localhost:4000/health || exit 1
+      <<: *healthcheck
+    <<: *logging
+    networks:
+      - internal
+    depends_on:
+      - redis
+    deploy:
+      <<: *deploy
+
+networks:
+  internal:
+    external: true
+  external:
+    external: true

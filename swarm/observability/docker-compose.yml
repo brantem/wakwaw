@@ -1,0 +1,312 @@
+version: '3.8'
+
+x-healthcheck: &healthcheck
+  interval: 15s
+  timeout: 5s
+  start_period: 30s
+  retries: 5
+
+x-logging: &logging
+  logging:
+    options:
+      max-size: 4m
+      max-file: 10
+      tag: '{{.ImageName}}/{{.Name}}/{{.ID}}'
+
+x-deploy: &deploy
+  restart_policy:
+    max_attempts: 2
+  rollback_config:
+    parallelism: 1
+  update_config:
+    parallelism: 1
+    failure_action: rollback
+    order: start-first
+  placement:
+    constraints:
+      - node.role == manager
+  resources:
+    limits:
+      cpus: '0.25'
+      memory: 250mb
+
+services:
+  promtail:
+    image: grafana/promtail:3.0.0
+    env_file:
+      - ../.env
+    volumes:
+      - promtail:/tmp/promtail
+      - ./promtail/config.yml:/etc/promtail/config.yml
+      - /var/run/docker.sock:/var/run/docker.sock
+    command:
+      - --config.file=/etc/promtail/config.yml
+      - --config.expand-env=true
+      - --log.level=warn
+      - --log.format=json
+    <<: *logging
+    networks:
+      - internal
+    depends_on:
+      - loki
+    deploy:
+      <<: *deploy
+      mode: global
+
+  loki:
+    image: grafana/loki:3.0.0
+    user: root
+    ports:
+      - 3100
+    env_file:
+      - ../.env
+    volumes:
+      - loki:/tmp/loki
+      - ./loki/config.yml:/etc/loki/config.yml
+    command:
+      - -log-config-reverse-order
+      - -config.file=/etc/loki/config.yml
+      - -config.expand-env=true
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:3100/ready || exit 1
+      <<: *healthcheck
+    <<: *logging
+    networks:
+      - internal
+    depends_on:
+      - minio
+    deploy:
+      <<: *deploy
+      mode: replicated
+      replicas: 1
+
+  grafana:
+    image: grafana/grafana-enterprise:11.0.0
+    user: root
+    ports:
+      - 3000
+    env_file:
+      - ../.env
+    volumes:
+      - ./grafana/config.ini:/etc/grafana/grafana.ini
+      - ./grafana/dashboards:/etc/grafana/dashboards
+      - ./grafana/provisioning/datasources/all.yml:/etc/grafana/provisioning/datasources/all.yml
+      - ./grafana/provisioning/dashboards/all.yml:/etc/grafana/provisioning/dashboards/all.yml
+      - ./grafana/data:/var/lib/grafana
+    healthcheck:
+      test: curl -sf http://localhost:3000/api/health || exit 1
+      <<: *healthcheck
+    <<: *logging
+    networks:
+      - internal
+      - external
+    deploy:
+      <<: *deploy
+      mode: replicated
+      replicas: 1
+      labels:
+        - 'traefik.enable=true'
+        - 'traefik.http.routers.grafana.rule=Host(`${NAME}.${DOMAIN}`) && PathPrefix(`/grafana`)'
+        - 'traefik.http.services.grafana.loadbalancer.server.port=3000'
+        - 'traefik.docker.lbswarm=true'
+
+  tempo:
+    image: grafana/tempo:2.5.0
+    user: root
+    ports:
+      - 3200
+      - 4317
+    env_file:
+      - ../.env
+    volumes:
+      - tempo:/tmp/tempo
+      - ./tempo/config.yml:/etc/tempo/config.yml
+    command:
+      - -config.file=/etc/tempo/config.yml
+      - -config.expand-env=true
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:3200/ready || exit 1
+      <<: *healthcheck
+    <<: *logging
+    networks:
+      - internal
+    depends_on:
+      - minio
+    deploy:
+      <<: *deploy
+      mode: replicated
+      replicas: 1
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.100.0
+    ports:
+      - 4317
+      - 8888
+    env_file:
+      - ../.env
+    command:
+      - --config=/etc/otel-collector/config.yml
+    volumes:
+      - ./otel-collector/config.yml:/etc/otel-collector/config.yml
+    <<: *logging
+    networks:
+      - internal
+    depends_on:
+      - mimir
+    deploy:
+      <<: *deploy
+      mode: replicated
+      replicas: 1
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    ports:
+      - 8080
+    command:
+      - -logtostderr
+      - -docker_only
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    <<: *logging
+    networks:
+      - internal
+    deploy:
+      <<: *deploy
+      mode: global
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.0
+    ports:
+      - 9100
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --collector.filesystem.ignored-mount-points="^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)"
+    <<: *logging
+    networks:
+      - internal
+    deploy:
+      <<: *deploy
+      mode: global
+
+  redis_exporter:
+    image: oliver006/redis_exporter:v1.61.0
+    ports:
+      - 9121
+    environment:
+      - REDIS_ADDR=redis://redis:6379
+      - REDIS_EXPORTER_LOG_FORMAT=json
+    command:
+      - -log-format=json
+    <<: *logging
+    networks:
+      - internal
+    deploy:
+      <<: *deploy
+      mode: replicated
+      replicas: 1
+
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    ports:
+      - 9187
+    env_file:
+      - ../.env
+    environment:
+      DATA_SOURCE_NAME: postgres://${PG_USERNAME}:${PG_PASSWORD}@postgres:5432/${PG_DATABASE}?sslmode=disable
+    command:
+      - --log.level=warn
+      - --log.format=json
+    <<: *logging
+    networks:
+      - internal
+    deploy:
+      <<: *deploy
+      mode: replicated
+      replicas: 1
+
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    user: root
+    ports:
+      - target: 9090
+        mode: host
+    env_file:
+      - ../.env
+    volumes:
+      - prometheus:/prometheus
+      - ./prometheus/config.yml:/etc/prometheus/config.yml
+      - /var/run/docker.sock:/var/run/docker.sock
+    command:
+      - --config.file=/etc/prometheus/config.yml
+      - --web.external-url=https://${NAME}.${DOMAIN}/prometheus
+      - --web.route-prefix=/
+      - --storage.tsdb.path=/prometheus
+      - --log.level=warn
+      - --log.format=json
+    <<: *logging
+    networks:
+      - internal
+      - external
+    depends_on:
+      - mimir
+    deploy:
+      <<: *deploy
+      mode: replicated
+      replicas: 1
+      labels:
+        - 'traefik.http.middlewares.prometheus-basic-auth.basicauth.users=${PROMETHEUS_USERNAME}:${PROMETHEUS_ENCRYPTED_PASSWORD}'
+        - 'traefik.http.middlewares.strip-prometheus.stripprefix.prefixes=/prometheus'
+
+        - 'traefik.enable=true'
+        - 'traefik.http.routers.prometheus.rule=Host(`${NAME}.${DOMAIN}`) && PathPrefix(`/prometheus`)'
+        - 'traefik.http.routers.prometheus.middlewares=strip-prometheus,prometheus-basic-auth,no-robots'
+        - 'traefik.http.services.prometheus.loadbalancer.server.port=9090'
+        - 'traefik.docker.lbswarm=true'
+
+  mimir:
+    image: grafana/mimir:2.12.0
+    user: root
+    ports:
+      - 9009
+    env_file:
+      - ../.env
+    volumes:
+      - mimir:/tmp/mimir
+      - ./mimir/config.yml:/etc/mimir/config.yml
+    command:
+      - -config.file=/etc/mimir/config.yml
+      - -config.expand-env=true
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:9009/ready || exit 1
+      <<: *healthcheck
+    <<: *logging
+    networks:
+      - internal
+    depends_on:
+      - minio
+    deploy:
+      <<: *deploy
+      mode: replicated
+      replicas: 1
+
+volumes:
+  promtail:
+  loki:
+  tempo:
+  prometheus:
+  mimir:
+
+networks:
+  internal:
+    external: true
+  external:
+    external: true

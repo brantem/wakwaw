@@ -1,0 +1,125 @@
+version: '3.8'
+
+x-healthcheck: &healthcheck
+  interval: 15s
+  timeout: 5s
+  start_period: 30s
+  retries: 5
+
+x-logging: &logging
+  logging:
+    options:
+      max-size: 4m
+      max-file: 10
+      tag: '{{.ImageName}}/{{.Name}}/{{.ID}}'
+
+x-deploy: &deploy
+  mode: replicated
+  replicas: 1
+  restart_policy:
+    max_attempts: 2
+  rollback_config:
+    parallelism: 1
+  update_config:
+    parallelism: 1
+    failure_action: rollback
+    order: start-first
+  placement:
+    constraints:
+      - node.role == manager
+  resources:
+    limits:
+      cpus: '0.25'
+      memory: 250mb
+
+services:
+  traefik:
+    image: traefik:3.0
+    ports:
+      - target: 80
+        published: 80
+        mode: host
+      - target: 443
+        published: 443
+        mode: host
+      - target: 443
+        published: 443
+        protocol: udp
+        mode: host
+    env_file:
+      - ../.env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./data:/data
+    command:
+      - --accesslog=true
+      - --accesslog.format=json
+
+      - --api.dashboard=true
+      - --api.disabledashboardad=true
+
+      - --certificatesresolvers.default.acme.caserver=${ACME_SERVER}
+      - --certificatesresolvers.default.acme.dnschallenge=true
+      - --certificatesresolvers.default.acme.dnschallenge.provider=cloudflare
+      - --certificatesresolvers.default.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53
+      - --certificatesresolvers.default.acme.email=${ACME_EMAIL}
+      - --certificatesresolvers.default.acme.storage=/data/acme.json
+
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entryPoint.to=websecure
+      - --entrypoints.web.http.redirections.entryPoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.websecure.asDefault=true
+      - --entrypoints.websecure.http.tls=true
+      - --entrypoints.websecure.http.tls.certResolver=default
+      - --entrypoints.websecure.http.tls.domains[0].main=${DOMAIN}
+      - --entrypoints.websecure.http.tls.domains[0].sans=*.${DOMAIN}
+      - --entrypoints.websecure.http3=true
+      - --entrypoints.websecure.http3.advertisedport=443
+
+      - --log=true
+      - --log.format=json
+      - --log.level=WARN
+
+      - --metrics.otlp=true
+      - --metrics.otlp.grpc.endpoint=otel-collector:4317
+      - --metrics.otlp.grpc.insecure=true
+
+      - --ping=true
+
+      - --providers.swarm=true
+      - --providers.swarm.endpoint=unix:///var/run/docker.sock
+      - --providers.swarm.exposedByDefault=false
+      - --providers.swarm.network=external
+
+      - --tracing.otlp=true
+      - --tracing.otlp.grpc.endpoint=otel-collector:4317
+      - --tracing.otlp.grpc.insecure=true
+    healthcheck:
+      test: traefik healthcheck --ping
+      <<: *healthcheck
+    <<: *logging
+    networks:
+      - internal
+      - external
+    deploy:
+      <<: *deploy
+      labels:
+        - 'traefik.http.middlewares.basic-auth.basicauth.users=${TRAEFIK_USERNAME}:${TRAEFIK_ENCRYPTED_PASSWORD}'
+        - 'traefik.http.middlewares.no-robots.headers.customresponseheaders.X-Robots-Tag=noindex,nofollow,nosnippet,noarchive,notranslate,noimageindex'
+
+        - 'traefik.http.middlewares.autodetect.contenttype=true'
+        - 'traefik.http.middlewares.strip-traefik.stripprefix.prefixes=/traefik'
+
+        - 'traefik.enable=true'
+        - 'traefik.http.routers.traefik.rule=Host(`traefik.${DOMAIN}`)'
+        - 'traefik.http.routers.traefik.middlewares=strip-traefik,basic-auth,no-robots,autodetect'
+        - 'traefik.http.routers.traefik.service=api@internal'
+        - 'traefik.http.services.traefik.loadbalancer.server.port=8080'
+        - 'traefik.docker.lbswarm=true'
+
+networks:
+  internal:
+    external: true
+  external:
+    external: true

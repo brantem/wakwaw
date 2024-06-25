@@ -1,0 +1,8 @@
+---
+- name: Build
+  ansible.builtin.shell: |
+    docker build -t registry.local:5000/{{ app_name }}:latest -f {{ app_name }}/Dockerfile .
+    docker push registry.local:5000/{{ app_name }}:latest
+  args:
+    chdir: swarm/{{ app_path }}
+  changed_when: false

@@ -1,0 +1,6 @@
+log:
+  level: warn
+  formatter: json
+
+http:
+  addr: 0.0.0.0:5000

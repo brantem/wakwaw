@@ -1,0 +1,5 @@
+.vscode
+hosts
+id_rsa
+.env
+!swarm/app/.env

@@ -1,0 +1,83 @@
+version: '3.8'
+
+x-logging: &logging
+  logging:
+    options:
+      max-size: 4m
+      max-file: 10
+      tag: '{{.ImageName}}/{{.Name}}/{{.ID}}'
+
+x-deploy: &deploy
+  restart_policy:
+    max_attempts: 2
+  rollback_config:
+    parallelism: 1
+  update_config:
+    parallelism: 1
+    failure_action: rollback
+    order: start-first
+  resources:
+    limits:
+      cpus: '0.1'
+      memory: 250mb
+
+services:
+  agent:
+    image: portainer/agent:2.20.1-alpine
+    ports:
+      - 9001
+    environment:
+      AGENT_CLUSTER_ADDR: tasks.agent
+      AGENT_PORT: 9001
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/docker/volumes:/var/lib/docker/volumes
+    networks:
+      - internal
+    <<: *logging
+    deploy:
+      <<: *deploy
+      mode: global
+
+  portainer:
+    image: portainer/portainer-ce:2.20.1-alpine
+    ports:
+      - 8000
+      - 9001
+      - 9443
+    env_file:
+      - ../.env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock # https://github.com/portainer/portainer/issues/8806
+      - data:/data
+    command: --admin-password='${PORTAINER_ENCRYPTED_PASSWORD}' --host tcp://tasks.agent:9001 --tlsskipverify
+    <<: *logging
+    networks:
+      - internal
+      - external
+    depends_on:
+      - agent
+    deploy:
+      <<: *deploy
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        - 'traefik.http.middlewares.strip-portainer.stripprefix.prefixes=/portainer'
+
+        - 'traefik.enable=true'
+        - 'traefik.http.routers.portainer.rule=Host(`${NAME}.${DOMAIN}`) && PathPrefix(`/portainer`)'
+        - 'traefik.http.routers.portainer.middlewares=strip-portainer,no-robots'
+        - 'traefik.http.services.portainer.loadbalancer.server.port=9000'
+        - 'traefik.docker.lbswarm=true'
+
+volumes:
+  data:
+
+networks:
+  internal:
+    external: true
+  external:
+    external: true

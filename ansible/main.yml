@@ -1,0 +1,136 @@
+---
+- name: Prepare all
+  hosts: all
+  become: true
+  tasks:
+    - name: Install pip
+      ansible.builtin.apt:
+        name:
+          - python3-pip
+        state: present
+
+    - name: Install Docker SDK
+      ansible.builtin.pip:
+        name:
+          - docker
+          - jsondiff
+          - pyyaml
+
+    - name: Open ports
+      community.general.ufw:
+        rule: allow
+        port: '{{ item.port }}'
+        proto: '{{ item.proto | default(omit) }}'
+      loop:
+        - { port: 4789, proto: udp }
+        - { port: 7946 }
+        - { port: 9323, proto: tcp }
+
+    - name: Update /etc/hosts
+      ansible.builtin.lineinfile:
+        dest: /etc/hosts
+        regexp: ".*{{ hostvars[groups['manager'][0]].private_ip }}$"
+        line: "{{ hostvars[groups['manager'][0]].private_ip }} registry.local"
+        state: present
+
+    - name: Update /etc/docker/daemon.json
+      ansible.builtin.copy:
+        src: files/etc/docker/daemon.json
+        dest: /etc/docker/daemon.json
+        mode: '644'
+
+    - name: Restart Docker service
+      ansible.builtin.service:
+        name: docker
+        state: restarted
+        enabled: true
+
+- name: Prepare managers
+  hosts: manager
+  become: true
+  tasks:
+    - name: Open ports
+      community.general.ufw:
+        rule: allow
+        port: '{{ item.port }}'
+        proto: '{{ item.proto | default(omit) }}'
+      loop:
+        - { port: 80, proto: tcp }
+        - { port: 443 }
+        - { port: 2377, proto: tcp }
+        - { port: 5000, proto: tcp }
+
+- name: Prepare first manager
+  hosts: manager[0]
+  tasks:
+    - name: Init swarm
+      ansible.builtin.include_tasks: tasks/init-swarm.yml
+
+- name: Add managers
+  hosts: manager[1:]
+  tasks:
+    - name: Join swarm as manager
+      community.docker.docker_swarm:
+        state: join
+        advertise_addr: '{{ hostvars[inventory_hostname].private_ip }}:2377'
+        join_token: "{{ hostvars[groups['manager'][0]].join_token_manager }}"
+        remote_addrs: "{{ hostvars[groups['manager'][0]].private_ip }}:2377"
+
+- name: Add workers
+  hosts: worker
+  tasks:
+    - name: Join swarm as worker
+      community.docker.docker_swarm:
+        state: join
+        advertise_addr: '{{ ansible_host }}:2377'
+        join_token: "{{ hostvars[groups['manager'][0]].join_token_worker }}"
+        remote_addrs: "{{ hostvars[groups['manager'][0]].private_ip }}:2377"
+
+- name: Deploy
+  hosts: manager[0]
+  tasks:
+    - name: Copy swarm
+      ansible.posix.synchronize:
+        src: ../swarm
+        dest: '{{ ansible_env.HOME }}'
+        checksum: true
+        recursive: true
+        rsync_opts:
+          - '--exclude=.env.example'
+
+    - name: Create network
+      community.docker.docker_network:
+        name: '{{ item.name }}'
+        driver: overlay
+        internal: '{{ item.internal }}'
+      loop:
+        - { name: internal, internal: true }
+        - { name: external, internal: false }
+
+    - name: Deploy
+      ansible.builtin.shell: |
+        export $(cat .env) > /dev/null
+        docker stack deploy --prune -c deps/docker-compose.yml deps
+        docker stack deploy --prune -c observability/docker-compose.yml observability
+        docker stack deploy --prune -c traefik/docker-compose.yml traefik
+        docker stack deploy --prune -c portainer/docker-compose.yml portainer
+      args:
+        chdir: swarm/
+      changed_when: false
+
+    - name: Build app
+      vars:
+        app_path: app/
+        app_name: '{{ item }}'
+      ansible.builtin.include_tasks: tasks/build.yml
+      loop:
+        - api
+        - worker
+
+    - name: Deploy app
+      ansible.builtin.shell: |
+        export $(cat .env) > /dev/null
+        docker stack deploy --prune -c app/docker-compose.yml app
+      args:
+        chdir: swarm/
+      changed_when: false
